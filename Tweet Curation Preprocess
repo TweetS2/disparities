@@ -1,0 +1,269 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# Adapted from
+# https://towardsdatascience.com/extracting-twitter-data-pre-processing-and-sentiment-analysis-using-python-3-0-7192bd8b47cf
+# https://www.dropbox.com/s/5enwrz2ggswns56/Telemedicine_twitter_v3.5.py?dl=0
+# Note that the Python package name for the preprocessor is
+# "tweet-preprocessor"
+
+import os
+import pandas as pd
+import tweepy
+import re
+import string
+import preprocessor as p
+import json
+import csv
+import unicodecsv
+from datetime import datetime, date, timedelta
+import time
+
+from textblob import TextBlob
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from tweepy import Cursor
+from tweepy import Stream
+from tweepy import OAuthHandler
+from tweepy.streaming import StreamListener
+
+
+# Twitter credentials for the app
+consumer_key=''
+consumer_secret=''
+access_token=''
+access_token_secret=''
+
+
+# Authenticate with Twitter through Tweepy
+auth =  tweepy.OAuthHandler(consumer_key, consumer_secret)
+auth.set_access_token(access_token, access_token_secret)
+api = tweepy.API(auth, wait_on_rate_limit=True)
+
+#path
+#dementia_tweets = "data/dementia/dementia_data.csv"
+#BlackTwitter_tweets = "data/BlackTwitter/BlackTwitter_data.csv"
+#Twitter_tweets = "data/Twitter/Twitter_data.csv"
+
+# Define keywords (query) and file storage path for each collection
+collections = { 'dementia': { 'keywords': 'dementia OR Alzheimers OR Alz OR dementia AND care* OR Alzheimer AND care*',
+                              'path': "data/dementia/"
+                            },
+                'demencia': { 'keywords': '#demencia',
+                              'path': "data/demencia/"
+                            },
+                'BlackTwitter': { 'keywords': '#BlackTwitter OR #BlackLivesMatter OR #Staywoke',
+                                  'path': "data/BlackTwitter/"
+                                },
+                'Twitter': { 'keywords': 'Twitter',
+                             'path': "data/Twitter/"
+                           }
+              }
+
+# Put a collection's key in this list if you don't want to query it.
+# Set the list to empty [] to query all of the collections
+collections_to_ignore = ['Twitter']
+
+# Make sure the script is looking at the directory where it lives
+# This check is not necessary in most execution environments
+#abspath = os.path.abspath(__file__)
+#dname = os.path.dirname(abspath)
+#os.chdir(dname)
+
+# Create the data storage folders if they don't already exist
+if not os.path.isdir('./data'):
+    os.mkdir('./data')
+for coll in collections:
+    if coll in collections_to_ignore:
+        continue
+    if not os.path.isdir(collections[coll]['path']):
+        os.mkdir(collections[coll]['path'])
+
+
+
+# Columns of the csv file
+COLS = ['id', 'created_at', 'source', 'original_text', 'clean_text', 'polarity', 'subjectivity', 'lang',
+'favorite_count', 'retweet_count', 'original_author', 'possibly_sensitive', 'hashtags',
+'user_mentions', 'place', 'place_coord_boundaries']
+
+
+
+# Set the from date for searching to be a week from today
+# (7 days is the max for the Twitter public search API)
+start_time = date.today() - timedelta(7)
+start_date = start_time.strftime('%Y-%m-%d')
+
+
+
+# Happy Emoticons
+emoticons_happy = set([
+    ':-)', ':)', ';)', ':o)', ':]', ':3', ':c)', ':>', '=]', '8)', '=)', ':}',
+    ':^)', ':-D', ':D', '8-D', '8D', 'x-D', 'xD', 'X-D', 'XD', '=-D', '=D',
+    '=-3', '=3', ':-))', ":'-)", ":')", ':*', ':^*', '>:P', ':-P', ':P', 'X-P',
+    'x-p', 'xp', 'XP', ':-p', ':p', '=p', ':-b', ':b', '>:)', '>;)', '>:-)',
+    '<3'
+    ])
+
+
+
+
+# Sad Emoticons
+emoticons_sad = set([
+    ':L', ':-/', '>:/', ':S', '>:[', ':@', ':-(', ':[', ':-||', '=L', ':<',
+    ':-[', ':-<', '=\\', '=/', '>:(', ':(', '>.<', ":'-(", ":'(", ':\\', ':-c',
+    ':c', ':{', '>:\\', ';('
+    ])
+
+
+
+
+#Emoji patterns
+emoji_pattern = re.compile("["
+         u"\U0001F600-\U0001F64F"  # emoticons
+         u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+         u"\U0001F680-\U0001F6FF"  # transport & map symbols
+         u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+         u"\U00002702-\U000027B0"
+         u"\U000024C2-\U0001F251"
+         "]+", flags=re.UNICODE)
+
+
+
+
+#combine sad and happy emoticons
+emoticons = emoticons_happy.union(emoticons_sad)
+
+
+
+def clean_tweets(tweet):
+
+    stop_words = set(stopwords.words('english'))
+    word_tokens = word_tokenize(tweet)
+#after tweepy preprocessing the colon symbol left remain after      #removing mentions
+    tweet = re.sub(r':', '', tweet)
+    tweet = re.sub(r'‚Ä¶', '', tweet)
+#replace consecutive non-ASCII characters with a space
+    tweet = re.sub(r'[^\x00-\x7F]+',' ', tweet)
+#remove emojis from tweet
+    tweet = emoji_pattern.sub(r'', tweet)
+#filter using NLTK library append it to a string
+    filtered_tweet = [w for w in word_tokens if not w in stop_words]
+    filtered_tweet = []
+#looping through conditions
+    for w in word_tokens:
+#check tokens against stop words , emoticons and punctuations
+        if w not in stop_words and w not in emoticons and w not in string.punctuation:
+            filtered_tweet.append(w)
+    return ' '.join(filtered_tweet)
+
+
+
+TWEETS_PER_PAGE = 5
+PAGE_LIMIT = 50
+def write_tweets(query, outpath):
+
+    print("Searching for tweets:",query)
+
+    # If the file exists, then read the existing data from the CSV file.
+    # PMB Why would you do this if you're just appending the new tweets
+    # to the same output file?
+    #if os.path.exists(outpath):
+    #    df = pd.read_csv(outpath, header=0)
+    #else:
+    #    df = pd.DataFrame(columns=COLS)
+
+    new_entries = []
+    for page in tweepy.Cursor(api.search, tweet_mode='extended', q=query,
+                              wait_on_rate_limit=True, count=TWEETS_PER_PAGE,
+                              wait_on_rate_limit_notify=True, include_rts=False,
+                              since=start_date).pages(PAGE_LIMIT):
+
+        for status in page:
+            new_entry = []
+            status = status._json
+
+            ## check whether the tweet is in english or skip to the next tweet
+            if status['lang'] != 'en':
+                continue
+
+            # PMB: There were lots of things wrong with the original version
+            # of this code, and it's not clear that it's helpful anyway,
+            # so I'm disabling it.
+            #if status['id'] in df['id'].values:
+            #    i = df.loc[df['id'] == status['id']].index[0]
+            #    if (status['favorite_count'] != df.at[i, 'favorite_count'] or 
+            #        status['retweet_count'] != df.at[i, 'retweet_count']):
+            #        df.at[i, 'favorite_count'] = status['favorite_count']
+            #        df.at[i, 'retweet_count'] = status['retweet_count']
+            #    continue
+
+            ######preprocessing called for basic preprocessing
+            clean_text = p.clean(status['full_text'])
+
+            #####call clean_tweet method for extra preprocessing
+            filtered_tweet=clean_tweets(clean_text)
+
+            #pass textBlob method for sentiment calculations
+            blob = TextBlob(filtered_tweet)
+            Sentiment = blob.sentiment
+
+            #seperate polarity and subjectivity in to two variables
+            polarity = Sentiment.polarity
+            subjectivity = Sentiment.subjectivity
+
+            #new entry append
+            new_entry += [status['id'], status['created_at'], status['source'],
+                          status['full_text'], filtered_tweet, polarity,
+                          subjectivity, status['lang'],
+                          status['favorite_count'], status['retweet_count']]
+
+            #to append original author of the tweet
+            new_entry.append(status['user']['screen_name'])
+
+            is_sensitive = None
+            if 'possibly_sensitive' in status:
+                is_sensitive = status['possibly_sensitive']
+            new_entry.append(is_sensitive)
+
+            # hashtagas and mentions are saved using comma separted
+            hashtags = ", ".join([hashtag_item['text'] for hashtag_item in status['entities']['hashtags']])
+            new_entry.append(hashtags)
+            mentions = ", ".join([mention['screen_name'] for mention in status['entities']['user_mentions']])
+            new_entry.append(mentions)
+
+            #get location of the tweet if possible
+            try:
+                location = status['user']['location']
+            except TypeError:
+                location = ''
+            new_entry.append(location)
+
+            try:
+                coordinates = [coord for loc in status['place']['bounding_box']['coordinates'] for coord in loc]
+            except TypeError:
+                coordinates = None
+            new_entry.append(coordinates)
+
+            new_entries.append(new_entry)
+
+    # Write the new or updated data frame to the output file
+    # after processing all pages in the current bundle
+    df = pd.DataFrame(new_entries, columns=COLS)
+    with open(outpath, 'a' ,encoding='utf-8') as csvFile:
+        df.to_csv(csvFile, mode='a', columns=COLS, index=False, encoding="utf-8")
+
+# MAIN: collect tweets from the active collections,
+#       pausing for 15 mintues when rate limit is reached,
+#       writing the results to CSV files that have the hour
+#       of collection to the filename.
+#       Run until stopped.
+
+while True:
+    this_time = datetime.now()
+    hour_timestamp = this_time.strftime('%Y-%m-%d_%H')
+
+    for coll in collections:
+        if (coll in collections_to_ignore):
+            continue
+        output_path = collections[coll]['path'] + hour_timestamp + '.csv'
+        write_tweets(collections[coll]['keywords'], output_path)
